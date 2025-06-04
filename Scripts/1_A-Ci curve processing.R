@@ -54,6 +54,11 @@ combined_df <- combined_df %>%
 combined_df <- combined_df %>%
   separate(leaf_code, into = c("tree", "cohort", "leaf"), sep = "\\.", remove = FALSE)
 
+# quick check to see what gs is doing during these curves.
+ggplot(combined_df, aes(CO2_s, gsw))+
+  geom_point(alpha=0.4)+
+  facet_wrap(~tree, scales = "free")
+
 #before curating for aci curves - let us get the values at 415 ppm hoping they are similar to that measured (but not logged) under steady state
 unique(combined_df$SampleID)
 

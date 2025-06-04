@@ -4,6 +4,7 @@ library(readr)
 library(ggplot2)
 library(dplyr)
 library(tidyr)
+library(lubridate)
 
 ##### READ IN REFLECTANCE
 data <- read_table("Outputs/Processed reflectance data/Reflectance_Paracou_Processed.csv")
@@ -43,12 +44,11 @@ p <- ggplot(data = subset(data, tree == 16), aes(Wavelength, Ref_smooth, col = f
 p
 plotly::ggplotly(p)
 
-#for now remove the start and end but need to work out why that is happening and fix in original script. also remove that one weir dindividual 
-data <- subset(data, Wavelength >= 500 & Wavelength <= 940)
+#for now remove the start and end but need to work out why that is happening and fix in original script. also remove that one weird individual 
+data <- subset(data, Wavelength >= 500 & Wavelength <= 941)
 data <- subset(data, file_name != "\"reflection2_16.1.2_20230124.txt\"")
 
 # get average for each wavelength and code_unique
-
 mean_ref_smooth <- data %>%
   group_by(code_unique, leaf_code, tree, cohort, leaf, obs_date, date, Wavelength) %>%
   summarise(Ref_mean = mean(Ref_smooth, na.rm = TRUE),
@@ -67,6 +67,26 @@ traits$obs_date <- NULL
 merged_data <- merge(mean_ref_smooth, traits, by = c("code_unique", "leaf_code", "tree", "leaf", "date"))
 merged_data <- merge(merged_data, avg_ref, by = c("code_unique", "leaf_code", "tree", "leaf", "date"))
 
+#now make a column that identifies young, mid, and old leaves 
+#just for ensuring our test dataset for validation includes the full range of data
+
+#first check what the range is for each species
+traits %>% group_by(traits$sp) %>%
+  summarise(min_Agemid = min(Age_leaf_mid, na.rm = TRUE),
+            max_Agemid = max(Age_leaf_mid, na.rm = TRUE))
+
+#lets use the species range, split it into 3, and use those groupings.
+age_sections <- traits %>% group_by(sp) %>%
+  summarise(Agemid_33percent = quantile(Age_leaf_mid, 0.33, na.rm = TRUE),
+            Agemid_66percent = quantile(Age_leaf_mid, 0.66, na.rm = TRUE))
+
+merged_data <- merge(merged_data, age_sections, by = "sp", all.x = TRUE)
+merged_data$leafage_category <- "mature"
+merged_data$leafage_category[merged_data$Age_leaf_mid < merged_data$Agemid_33percent] <- "young"
+merged_data$leafage_category[merged_data$Age_leaf_mid > merged_data$Agemid_66percent] <- "old"
+
+#now make a new column that include the species name and the age category to use as the grouping variable for PLSR validation
+merged_data$sp_agecategory <- paste(merged_data$sp, merged_data$leafage_category, sep = "_")
 
 #quick plot
 ggplot(merged_data, aes(Wavelength, Ref_mean, col = Age_leaf_mid))+
@@ -82,8 +102,6 @@ ggplot(merged_data, aes(Age_leaf_mid, Avg_Ref_tot))+
 ggplot(merged_data, aes(julian_date, Avg_Ref_tot))+
   geom_point()+
   facet_wrap(~sp)
-
-
 
 #################################################################################
 # NOW WE WANT TO SEE IF WE CAN PREDICT VCMAX USING THE SPECTRA
@@ -108,59 +126,74 @@ pls::pls.options("plsralg")
 opar <- par(no.readonly = T)
 
 # What is the target variable?
-inVar <- "Vcmax_Estimate_final"
-
-
-
-
-# #just keep the unique id and the trait
-# trait <- trait[,c(38, 36, 11)] #Vcmax_Estimate_final as an example
-# unique(duplicated(trait$unique_id))
-# 
-# ### Create plsr dataset
-# Start.wave <- 500
-# End.wave <- 940
-# wv <- seq(Start.wave,End.wave,1)
-# Spectra <- as.matrix(dat_raw[,names(dat_raw) %in% wv])
-# colnames(Spectra) <- c(paste0("Wave_",wv))
-# head(Spectra)[1:6,1:10]
+#inVar <- "Vcmax_Estimate_final"
+inVar <- "PTLP"
+#inVar <- "leaf_thickness"
+#inVar <- "Nmass"
 
 
 # Step 1: Select the relevant columns
 plsr_data <- merged_data %>%
-  dplyr::select(code_unique, Vcmax_Estimate_final, Wavelength, Ref_mean)
+  dplyr::select(code_unique, sp, leafage_category, sp_agecategory, all_of(inVar), Wavelength, Ref_mean)
 
-# Step 2: Reshape the data to ensure Wavelength is in columns
+plsr_data$Wavelength <- round(plsr_data$Wavelength) #round to remove the bit after the . which is the same for all cells
+
+#plsr_data$Wavelength_col <- paste("Wave_", plsr_data$Wavelength, sep = "")
+
+# Step 2: Reshape the data to ensure Wavelength is in separate columns (convert to wide format)
 # Assuming each observation is associated with multiple wavelengths
 plsr_data <- plsr_data %>%
-  gather(key = "Wavelength", value = "Ref_mean", starts_with("Wave_"))
+  select(code_unique, sp, leafage_category, sp_agecategory, all_of(inVar), Wavelength, Ref_mean) %>%
+  pivot_wider(names_from = Wavelength, values_from = Ref_mean)
 
 
-
-
+# ### Create plsr dataset
+Start.wave <- 500
+End.wave <- 940
+wv <- seq(Start.wave,End.wave,1)
+Spectra <- as.matrix(plsr_data[,names(plsr_data) %in% wv])
+colnames(Spectra) <- c(paste0("Wave_",wv))
+head(Spectra)[1:6,1:10]
 
 plsr_data <- plsr_data[complete.cases(plsr_data[,names(plsr_data) %in% 
                                                   c(inVar,paste0("Wave_",wv))]),]
 
 #check if trait data is normally distributed
-ggplot(plsr_data, aes(Vcmax_Estimate_final))+
+ggplot(plsr_data, aes(x = .data[[inVar]])) +
   geom_histogram() #data is skewed so should be transformed
 
 #transform data if needed
-#plsr_data$cci_log <- log10(plsr_data$cci_mean)
+plsr_data <- plsr_data %>%
+  mutate(!!paste0(inVar, "_log10") := log10(.data[[inVar]]))
 
-#or exclude outlier
-plsr_data <- subset(plsr_data, Vcmax_Estimate_final <= 80)
+ggplot(plsr_data, aes(x = .data[[paste0(inVar, "_log10")]])) +
+  geom_histogram() 
+#PLSR is very sensitive to outliers - given this is for predictions outliers should be excluded.
+#Have already done this. Working with the cleaned data.
+
+#change inVar to the log transformed one
+inVar <- paste0(inVar, "_log10")
+
+#make sure updated column is before all the wavelength columns
+#plsr_data <- plsr_data %>% relocate(Vcmax_Estimate_final_log10, .after = Vcmax_Estimate_final)
+#plsr_data$Vcmax_Estimate_final <- NULL
 
 ###############################################################################
 ### Create cal/val datasets
-## Make a stratified random sampling in the strata USDA_Species_Code and Domain
+## Make a stratified random sampling in the strata species and age category - i.e. sp_agecategory
 
 method <- "dplyr" #base/dplyr
 # base R - a bit slow
 # dplyr - much faster
+# split_data <- spectratrait::create_data_split(dataset=plsr_data, approach=method, split_seed=2356812, 
+#                                               prop=0.7, group_variables="sp_agecategory") #split by species and age category
+
 split_data <- spectratrait::create_data_split(dataset=plsr_data, approach=method, split_seed=2356812, 
-                                              prop=0.8, group_variables="code_unique")
+                                              prop=0.7, group_variables="sp") #split only by species
+
+# split_data <- spectratrait::create_data_split(dataset=plsr_data, approach=method, split_seed=2356812, 
+#                                               prop=0.7, group_variables="leafage_category") #split only by age category
+
 names(split_data)
 cal.plsr.data <- split_data$cal_data
 head(cal.plsr.data)[1:8]
@@ -168,17 +201,27 @@ val.plsr.data <- split_data$val_data
 head(val.plsr.data)[1:8]
 rm(split_data)
 
+#remove the x from the clumn names
+cal.plsr.data <- cal.plsr.data %>%
+  rename_with(~ ifelse(grepl("^X\\d+$", .x),
+                       paste0("Wave_", sub("^X", "", .x)),
+                       .x))
+
+val.plsr.data <- val.plsr.data %>%
+  rename_with(
+    ~ paste0("Wave_", .x),
+    .cols = matches("^\\d+$")
+  )
+
 # Datasets:
 print(paste("Cal observations: ",dim(cal.plsr.data)[1],sep=""))
 print(paste("Val observations: ",dim(val.plsr.data)[1],sep=""))
 
-cal_hist_plot <- qplot(cal.plsr.data[,paste0(inVar)],geom="histogram",
-                       main = paste0("Cal. Histogram for ",inVar),
-                       xlab = paste0(inVar),ylab = "Count",fill=I("grey50"),col=I("black"),alpha=I(.7))
-val_hist_plot <- qplot(val.plsr.data[,paste0(inVar)],geom="histogram",
-                       main = paste0("Val. Histogram for ",inVar),
-                       xlab = paste0(inVar),ylab = "Count",fill=I("grey50"),col=I("black"),alpha=I(.7))
-histograms <- grid.arrange(cal_hist_plot, val_hist_plot, ncol=2)
+#histograms
+cal_hist_plot <- ggplot(cal.plsr.data, aes(x = .data[[inVar]])) + geom_histogram()
+val_hist_plot <- ggplot(val.plsr.data, aes(x = .data[[inVar]])) + geom_histogram()
+histograms <- ggpubr::ggarrange(cal_hist_plot, val_hist_plot, ncol=2)
+histograms
 
 ################################################################################
 ### Format PLSR data for model fitting 
@@ -212,12 +255,13 @@ if(grepl("Windows", sessionInfo()$running)){
   pls.options(parallel = parallel::detectCores()-1)
 }
 
-method <- "firstPlateau" #pls, firstPlateau, firstMin
+#method <- "firstPlateau" #pls, firstPlateau, firstMin
+method <- "pls" #pls, firstPlateau, firstMin
 random_seed <- 2356812
 seg <- 40 #originally had this at 100 but need to have less segments than observations this only matters if method = "pls"
 maxComps <- 18
 iterations <- 1000
-prop <- 0.60
+prop <- 0.70
 if (method=="pls") {
   nComps <- spectratrait::find_optimal_components(dataset=cal.plsr.data, targetVariable=inVar,
                                                   method=method, 

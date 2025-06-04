@@ -185,15 +185,16 @@ data$g1.spots <- (data$cica * sqrt(1.6))/(1-data$cica) #ASSUMING vpd OF 1.6 WHIC
 data$g1.spots <- (data$cica * sqrt(data$vpd))/(1-data$cica) 
 
 
-################## 
-# ARE LEAF AGE AND SAMPLING DATE CORRELATED IN EACH SPECIES?
-#################
-
 # Convert sampling_date to numeric
 library(lubridate)
 
 data <- data %>%
   mutate(julian_date = yday(date))  # Or as.numeric(sampling_date) for days since 1970-01-01
+
+
+################## 
+# ARE LEAF AGE AND SAMPLING DATE CORRELATED IN EACH SPECIES?
+#################
 
 # Calculate Pearson correlation within each species
 cor_by_species <- data %>%
